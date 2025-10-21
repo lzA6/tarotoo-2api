@@ -1,0 +1,451 @@
+项目 'tarotoo-2api' 的结构树:
+📂 tarotoo-2api/
+    📄 .env
+    📄 .env.example
+    📄 Dockerfile
+    📄 docker-compose.yml
+    📄 main.py
+    📄 nginx.conf
+    📄 requirements.txt
+    📂 app/
+        📂 core/
+            📄 __init__.py
+            📄 config.py
+        📂 providers/
+            📄 __init__.py
+            📄 base_provider.py
+            📄 tarotoo_provider.py
+        📂 utils/
+            📄 sse_utils.py
+================================================================================
+
+--- 文件路径: .env ---
+
+# ====================================================================
+# tarotoo-2api 配置文件模板 (v1.0 - 零配置版)
+# ====================================================================
+#
+# 请将此文件重命名为 ".env" 并按需修改。
+# 该项目无需任何 Cookie 或凭证，可直接启动。
+#
+
+# --- 核心安全配置 (必须设置) ---
+# 用于保护您 API 服务的访问密钥。强烈建议修改为一个复杂的、您自己的密钥。
+API_MASTER_KEY=1
+
+# --- 部署配置 (可选) ---
+# Nginx 对外暴露的端口
+NGINX_PORT=8087
+
+
+--- 文件路径: .env.example ---
+
+# ====================================================================
+# tarotoo-2api 配置文件模板 (v1.0 - 零配置版)
+# ====================================================================
+#
+# 请将此文件重命名为 ".env" 并按需修改。
+# 该项目无需任何 Cookie 或凭证，可直接启动。
+#
+
+# --- 核心安全配置 (必须设置) ---
+# 用于保护您 API 服务的访问密钥。强烈建议修改为一个复杂的、您自己的密钥。
+API_MASTER_KEY=tarotoo-2api-default-key
+
+# --- 部署配置 (可选) ---
+# Nginx 对外暴露的端口
+NGINX_PORT=8087
+
+
+--- 文件路径: Dockerfile ---
+
+# ====================================================================
+# Dockerfile for tarotoo-2api (v1.1 - EOL & Concurrency Fixed)
+# ====================================================================
+
+# 使用一个更现代且受支持的 Debian 版本 "Bullseye" 作为基础
+FROM python:3.10-slim-bullseye
+
+# 设置环境变量
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# 安装 cloudscraper 所需的系统依赖
+# Bullseye 的源是活跃的，无需修改
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential curl && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 安装 Python 依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# 复制应用代码
+COPY . .
+
+# 创建并切换到非 root 用户
+RUN useradd --create-home appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
+# 暴露端口并以单 Worker 模式启动，以保证会话一致性
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+
+
+
+--- 文件路径: docker-compose.yml ---
+
+services:
+  nginx:
+    image: nginx:latest
+    container_name: tarotoo-2api-nginx
+    restart: always
+    ports:
+      - "${NGINX_PORT:-8087}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+    networks:
+      - tarotoo-net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tarotoo-2api-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - tarotoo-net
+
+networks:
+  tarotoo-net:
+    driver: bridge
+
+
+--- 文件路径: main.py ---
+
+import sys
+from contextlib import asynccontextmanager
+from typing import Optional
+
+from fastapi import FastAPI, Request, HTTPException, Depends, Header
+from fastapi.responses import JSONResponse, StreamingResponse
+from loguru import logger
+
+from app.core.config import settings
+from app.providers.tarotoo_provider import TarotooProvider
+
+# --- 配置 Loguru ---
+logger.remove()
+logger.add(
+    sys.stdout,
+    level="INFO",
+    format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+           "<level>{level: <8}</level> | "
+           "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+    colorize=True
+)
+
+provider = TarotooProvider()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info(f"应用启动中... {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info("服务已进入 'CF Penetration & Pseudo-Stream' 模式。")
+    logger.info(f"服务将在 http://localhost:{settings.NGINX_PORT} 上可用")
+    yield
+    logger.info("应用关闭。")
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    description=settings.DESCRIPTION,
+    lifespan=lifespan
+)
+
+async def verify_api_key(authorization: Optional[str] = Header(None)):
+    if settings.API_MASTER_KEY and settings.API_MASTER_KEY != "tarotoo-2api-default-key":
+        if not authorization or "bearer" not in authorization.lower():
+            raise HTTPException(status_code=401, detail="需要 Bearer Token 认证。")
+        token = authorization.split(" ")[-1]
+        if token != settings.API_MASTER_KEY:
+            raise HTTPException(status_code=403, detail="无效的 API Key。")
+
+@app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])
+async def chat_completions(request: Request):
+    try:
+        request_data = await request.json()
+        return await provider.chat_completion(request_data)
+    except Exception as e:
+        logger.error(f"处理聊天请求时发生顶层错误: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
+
+@app.get("/v1/models", dependencies=[Depends(verify_api_key)], response_class=JSONResponse)
+async def list_models():
+    return await provider.get_models()
+
+@app.get("/", summary="根路径", include_in_schema=False)
+def root():
+    return {"message": f"欢迎来到 {settings.APP_NAME} v{settings.APP_VERSION}. 服务运行正常。"}
+
+
+
+--- 文件路径: nginx.conf ---
+
+worker_processes auto;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    # 启用粘性会话以确保 Cloudscraper 会话的连续性
+    upstream tarotoo_backend {
+        ip_hash;
+        server app:8000;
+    }
+
+    server {
+        listen 80;
+        server_name localhost;
+
+        location / {
+            proxy_pass http://tarotoo_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            # 流式传输优化
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_set_header Connection '';
+            proxy_http_version 1.1;
+            chunked_transfer_encoding off;
+        }
+    }
+}
+
+
+--- 文件路径: requirements.txt ---
+
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-dotenv
+cloudscraper
+httpx
+loguru
+
+
+--- 文件路径: app\core\__init__.py ---
+
+
+
+--- 文件路径: app\core\config.py ---
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import List, Optional
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding='utf-8',
+        extra="ignore"
+    )
+
+    APP_NAME: str = "tarotoo-2api"
+    APP_VERSION: str = "1.0.0"
+    DESCRIPTION: str = "一个将 tarotoo.com 匿名聊天功能转换为兼容 OpenAI 格式 API 的高性能代理，内置 Cloudflare 穿透和伪流式生成功能。"
+
+    API_MASTER_KEY: Optional[str] = "tarotoo-2api-default-key"
+    
+    API_REQUEST_TIMEOUT: int = 180
+    NGINX_PORT: int = 8087
+    PSEUDO_STREAM_DELAY: float = 0.01 # 伪流式输出的字符间隔（秒）
+
+    DEFAULT_MODEL: str = "tarotoo-psychic-chat"
+    KNOWN_MODELS: List[str] = ["tarotoo-psychic-chat"]
+
+settings = Settings()
+
+
+--- 文件路径: app\providers\__init__.py ---
+
+
+
+--- 文件路径: app\providers\base_provider.py ---
+
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Union
+from fastapi.responses import StreamingResponse, JSONResponse
+
+class BaseProvider(ABC):
+    @abstractmethod
+    async def chat_completion(
+        self,
+        request_data: Dict[str, Any]
+    ) -> Union[StreamingResponse, JSONResponse]:
+        pass
+
+    @abstractmethod
+    async def get_models(self) -> JSONResponse:
+        pass
+
+
+--- 文件路径: app\providers\tarotoo_provider.py ---
+
+import json
+import time
+import uuid
+import asyncio
+import cloudscraper
+from typing import Dict, Any, AsyncGenerator
+
+from fastapi import HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
+from loguru import logger
+
+from app.core.config import settings
+from app.providers.base_provider import BaseProvider
+from app.utils.sse_utils import create_sse_data, create_chat_completion_chunk, DONE_CHUNK
+
+class TarotooProvider(BaseProvider):
+    def __init__(self):
+        self.scraper = cloudscraper.create_scraper()
+        self.api_url = "https://tarotoo.com/wp-json/openai/v1/chat-message"
+        logger.info("TarotooProvider 初始化完成，使用 Cloudscraper 作为 HTTP 客户端。")
+
+    async def chat_completion(self, request_data: Dict[str, Any]) -> StreamingResponse:
+        
+        async def stream_generator() -> AsyncGenerator[bytes, None]:
+            request_id = f"chatcmpl-{uuid.uuid4()}"
+            model_name = request_data.get("model", settings.DEFAULT_MODEL)
+            
+            try:
+                headers = self._prepare_headers()
+                payload = self._prepare_payload(request_data)
+                
+                logger.info(f"正在向上游发送请求: {self.api_url}")
+                logger.debug(f"Payload: {payload}")
+
+                # 使用 Cloudscraper 执行同步请求
+                # 在 FastAPI 的异步视图中，对于 I/O 密集型操作，这是可接受的
+                response = self.scraper.post(
+                    self.api_url, 
+                    headers=headers, 
+                    json=payload,
+                    timeout=settings.API_REQUEST_TIMEOUT
+                )
+
+                logger.info(f"上游响应状态码: {response.status_code}")
+                response.raise_for_status()
+                
+                response_data = response.json()
+                logger.debug(f"上游响应数据: {response_data}")
+                
+                full_content = response_data.get("content")
+                if full_content is None:
+                    raise ValueError("上游响应中缺少 'content' 字段。")
+
+                # 应用【模式：伪流式生成】
+                for char in full_content:
+                    chunk = create_chat_completion_chunk(request_id, model_name, char)
+                    yield create_sse_data(chunk)
+                    await asyncio.sleep(settings.PSEUDO_STREAM_DELAY)
+                
+                final_chunk = create_chat_completion_chunk(request_id, model_name, "", "stop")
+                yield create_sse_data(final_chunk)
+
+            except Exception as e:
+                logger.error(f"处理流时发生错误: {e}", exc_info=True)
+                error_message = f"内部服务器错误: {str(e)}"
+                error_chunk = create_chat_completion_chunk(request_id, model_name, error_message, "stop")
+                yield create_sse_data(error_chunk)
+            finally:
+                yield DONE_CHUNK
+                logger.info(f"请求 {request_id} 的流式响应结束。")
+
+        return StreamingResponse(stream_generator(), media_type="text/event-stream")
+
+    def _prepare_headers(self) -> Dict[str, str]:
+        # cloudscraper 会自动管理 User-Agent 和 Cookie
+        return {
+            "accept": "*/*",
+            "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "content-type": "application/json",
+            "origin": "https://tarotoo.com",
+            "referer": "https://tarotoo.com/psychic",
+            "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+        }
+
+    def _prepare_payload(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        messages = request_data.get("messages", [])
+        if not messages:
+            raise HTTPException(status_code=400, detail="请求体中缺少 'messages' 字段或为空。")
+        
+        # 精确复制上游API所需的payload结构
+        return {
+            "messages": messages,
+            "currentSiteLang": "en"
+        }
+
+    async def get_models(self) -> JSONResponse:
+        model_data = {
+            "object": "list",
+            "data": [
+                {"id": name, "object": "model", "created": int(time.time()), "owned_by": "lzA6"}
+                for name in settings.KNOWN_MODELS
+            ]
+        }
+        return JSONResponse(content=model_data)
+
+
+
+--- 文件路径: app\utils\sse_utils.py ---
+
+import json
+import time
+from typing import Dict, Any, Optional
+
+DONE_CHUNK = b"data: [DONE]\n\n"
+
+def create_sse_data(data: Dict[str, Any]) -> bytes:
+    """将字典数据格式化为 SSE 事件字符串。"""
+    return f"data: {json.dumps(data)}\n\n".encode('utf-8')
+
+def create_chat_completion_chunk(
+    request_id: str,
+    model: str,
+    content: str,
+    finish_reason: Optional[str] = None
+) -> Dict[str, Any]:
+    """创建一个与 OpenAI 兼容的聊天补全流式块。"""
+    return {
+        "id": request_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"content": content},
+                "finish_reason": finish_reason
+            }
+        ]
+    }
+
+
+

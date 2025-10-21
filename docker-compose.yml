@@ -1,0 +1,28 @@
+services:
+  nginx:
+    image: nginx:latest
+    container_name: tarotoo-2api-nginx
+    restart: always
+    ports:
+      - "${NGINX_PORT:-8087}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+    networks:
+      - tarotoo-net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tarotoo-2api-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - tarotoo-net
+
+networks:
+  tarotoo-net:
+    driver: bridge
